@@ -110,6 +110,8 @@ t_max_err   primefir_attr_set_keys_a(t_primefir* x, void* attr, long ac, t_atom*
 // Utilità
 static inline double clamp01(double v) { return (v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v)); }
 void        primefir_make_primes(t_primefir* x, int count_needed);
+
+static int  prime_upper_bound_from_count(int count_needed);
 void        primefir_update_kernel(t_primefir* x);
 
 // Bessel I0 (Kaiser)
@@ -646,11 +648,32 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
 }
 
 // =====================  PRIMI (sieve)  =====================
+static int prime_upper_bound_from_count(int count_needed)
+{
+  if (count_needed <= 0) return 2;
+
+  static const int kSmallPrimeBounds[] = {2, 3, 5, 7, 11, 13};
+  if (count_needed <= 6) return kSmallPrimeBounds[count_needed - 1];
+
+  const double dn      = static_cast<double>(count_needed);
+  const double logn    = std::log(dn);
+  const double loglogn = std::log(logn);
+
+  // Dusart upper bound n (log n + log log n) for n >= 6, with an extra margin
+  // (10% + constant) to guard against rounding and small deviations.
+  const double estimate = dn * (logn + loglogn);
+  const double margin   = std::max(16.0, estimate * 0.1);
+
+  const int limit = static_cast<int>(std::ceil(estimate + margin));
+  return std::max(limit, kSmallPrimeBounds[5]);
+}
+
 void primefir_make_primes(t_primefir* x, int count_needed)
 {
   if (x->primes_ready && x->primes_count >= count_needed) return;
 
-  const int limit = 200000; // sufficiente per ~18000 primi
+  const int capped_count = std::max(1, std::min(count_needed, kPrimeTableSize - 1));
+  const int limit = prime_upper_bound_from_count(capped_count);
   std::vector<bool> is_composite(limit + 1, false);
   std::vector<int>  plist; plist.reserve(std::min(count_needed + 64, kPrimeTableSize));
 
