@@ -60,6 +60,7 @@ typedef struct _primefir {
   long        param_mode;       // seq_mode
   char        param_normalize;  // 0/1
   char        param_gaincomp;   // 0/1
+  char        param_linphase;   // 0/1, abilita kernel simmetrico
   long        param_interp;     // interp_mode
   long        param_winshape;   // winshape
   double      param_kaiser_beta;// Kaiser β
@@ -79,6 +80,14 @@ typedef struct _primefir {
   double      ffrac[kMaxWindow + 1];   // frazione [0,1) per d
   double      post_scale;
   bool        dirty;
+  uint32_t    latency;                 // L = max(D) + 1
+  double      fir0;                    // tap centrale (d=0)
+
+  double      w_lin_fwd [kMaxWindow + 1][2];
+  double      w_lag4_fwd[kMaxWindow + 1][4];
+  double      w_keys_fwd[kMaxWindow + 1][4];
+  double      w_far3_fwd[kMaxWindow + 1][4];
+  double      w_far5_fwd[kMaxWindow + 1][6];
 
   // Primi
   int         primes[kPrimeTableSize]; // primes[1..primes_count]
@@ -102,6 +111,7 @@ t_max_err   primefir_attr_set_window(t_primefir* x, void* attr, long ac, t_atom*
 t_max_err   primefir_attr_set_mode(t_primefir* x, void* attr, long ac, t_atom* av);
 t_max_err   primefir_attr_set_normalize(t_primefir* x, void* attr, long ac, t_atom* av);
 t_max_err   primefir_attr_set_gaincomp(t_primefir* x, void* attr, long ac, t_atom* av);
+t_max_err   primefir_attr_set_linphase(t_primefir* x, void* attr, long ac, t_atom* av);
 t_max_err   primefir_attr_set_interp(t_primefir* x, void* attr, long ac, t_atom* av);
 t_max_err   primefir_attr_set_winshape(t_primefir* x, void* attr, long ac, t_atom* av);
 t_max_err   primefir_attr_set_kaiser_beta(t_primefir* x, void* attr, long ac, t_atom* av);
@@ -168,6 +178,10 @@ extern "C" int C74_EXPORT main(void)
   CLASS_ATTR_ACCESSORS(c, "gaincomp", NULL, primefir_attr_set_gaincomp);
   CLASS_ATTR_STYLE_LABEL(c, "gaincomp",  0, "onoff", "Gain Compensation sqrt(freq) (0/1)");
 
+  CLASS_ATTR_CHAR(c,    "linphase",  0, t_primefir, param_linphase);
+  CLASS_ATTR_STYLE_LABEL(c, "linphase", 0, "onoff", "Linear-Phase (symmetric)");
+  CLASS_ATTR_ACCESSORS(c, "linphase", NULL, primefir_attr_set_linphase);
+
   CLASS_ATTR_LONG(c,    "interp",    0, t_primefir, param_interp);
   CLASS_ATTR_ACCESSORS(c, "interp", NULL, primefir_attr_set_interp);
   CLASS_ATTR_STYLE_LABEL(c, "interp", 0, "enumindex", "Interpolation (off/linear/lagrange4/catmullrom/farrow3/farrow5)");
@@ -217,6 +231,7 @@ void* primefir_new(t_symbol* s, long argc, t_atom* argv)
   x->param_mode      = (long)seq_mode::prime;
   x->param_normalize = 0;
   x->param_gaincomp  = 1;
+  x->param_linphase  = 0;
 
   x->param_interp    = (long)interp_mode::farrow5;    // default: massima qualità
   x->param_winshape  = (long)winshape::blackmanharris;// default: BH 4-term
@@ -234,6 +249,13 @@ void* primefir_new(t_symbol* s, long argc, t_atom* argv)
   std::fill(std::begin(x->ffrac), std::end(x->ffrac), 0.0);
   x->post_scale    = 1.0;
   x->dirty         = true;
+  x->latency       = 0;
+  x->fir0          = 0.0;
+  std::memset(x->w_lin_fwd,  0, sizeof(x->w_lin_fwd));
+  std::memset(x->w_lag4_fwd, 0, sizeof(x->w_lag4_fwd));
+  std::memset(x->w_keys_fwd, 0, sizeof(x->w_keys_fwd));
+  std::memset(x->w_far3_fwd, 0, sizeof(x->w_far3_fwd));
+  std::memset(x->w_far5_fwd, 0, sizeof(x->w_far5_fwd));
 
   x->primes_ready  = false;
   x->primes_count  = 0;
@@ -286,6 +308,10 @@ t_max_err primefir_attr_set_normalize(t_primefir* x, void*, long ac, t_atom* av)
 }
 t_max_err primefir_attr_set_gaincomp(t_primefir* x, void*, long ac, t_atom* av) {
   if (ac && av) { x->param_gaincomp = (char)(atom_getlong(av) ? 1 : 0); x->dirty = true; }
+  return MAX_ERR_NONE;
+}
+t_max_err primefir_attr_set_linphase(t_primefir* x, void*, long ac, t_atom* av) {
+  if (ac && av) { x->param_linphase = (char)(atom_getlong(av) ? 1 : 0); x->dirty = true; }
   return MAX_ERR_NONE;
 }
 t_max_err primefir_attr_set_interp(t_primefir* x, void*, long ac, t_atom* av) {
