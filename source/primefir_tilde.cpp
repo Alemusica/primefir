@@ -173,7 +173,7 @@ extern "C" int C74_EXPORT main(void)
   CLASS_ATTR_STYLE_LABEL(c, "interp", 0, "enumindex", "Interpolation (off/linear/lagrange4/catmullrom/farrow3/farrow5)");
 #ifdef CLASS_ATTR_ENUMINDEX
   CLASS_ATTR_ENUMINDEX(c, "interp", 0,
-                       "off", "linear", "lagrange4", "catmullrom", "farrow3", "farrow5");
+                       "off linear lagrange4 catmullrom farrow3 farrow5");
 #else
   CLASS_ATTR_ENUM(c, "interp", 0, "off linear lagrange4 catmullrom farrow3 farrow5");
 #endif
@@ -183,7 +183,7 @@ extern "C" int C74_EXPORT main(void)
   CLASS_ATTR_STYLE_LABEL(c, "winshape", 0, "enumindex", "Window (hann/hamming/blackman/blackmanharris/nuttall/kaiser)");
 #ifdef CLASS_ATTR_ENUMINDEX
   CLASS_ATTR_ENUMINDEX(c, "winshape", 0,
-                       "hann", "hamming", "blackman", "blackmanharris", "nuttall", "kaiser");
+                       "hann hamming blackman blackmanharris nuttall kaiser");
 #else
   CLASS_ATTR_ENUM(c, "winshape", 0, "hann hamming blackman blackmanharris nuttall kaiser");
 #endif
