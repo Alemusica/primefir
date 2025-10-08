@@ -367,7 +367,7 @@ static inline double seq_value_d(const t_primefir* x, int n)
 
 // =====================  FINESTRE RADIALI  =====================
 // w(d), d=0..w-1 (picco a d=0, taper verso d=w-1)
-static inline double window_value_radial(int d, int w, winshape ws, double kaiser_beta)
+static inline double window_value_radial(int d, int w, winshape ws, double kaiser_beta, double inv_i0beta)
 {
   const int Dmax = w - 1;
   if (Dmax <= 0) return 1.0;
@@ -400,9 +400,8 @@ static inline double window_value_radial(int d, int w, winshape ws, double kaise
       // I0(β * sqrt(1 - (d/Dmax)^2)) / I0(β)
       double r   = (double)d / (double)Dmax;
       double t   = std::sqrt(std::max(0.0, 1.0 - r * r));
-      double den = i0_approx(kaiser_beta);
       double num = i0_approx(kaiser_beta * t);
-      return (den > 0.0 ? (num / den) : 1.0);
+      return (inv_i0beta > 0.0 ? (num * inv_i0beta) : 1.0);
     }
     default: return 1.0;
   }
@@ -445,13 +444,19 @@ void primefir_update_kernel(t_primefir* x)
   x->ffrac[0] = 0.0;
 
   // Costruzione sinc * finestra radiale su d=1..w-1
+  double inv_i0beta = 0.0;
+  if (ws == winshape::kaiser) {
+    double den = i0_approx(x->param_kaiser_beta);
+    inv_i0beta = (den > 0.0 ? (1.0 / den) : 0.0);
+  }
+
   for (int d = 1; d < w; ++d) {
     const bool linear = (static_cast<seq_mode>(x->param_mode) == seq_mode::linear);
     const double off  = linear ? (double)d : seq_value_d(x, d);  // ritardo “tempo” a distanza d
     const double t    = off * f_rel;
     const double sinc = (t != 0.0) ? std::sin(t) / t : 1.0;
 
-    const double win  = window_value_radial(d, w, ws, x->param_kaiser_beta);
+    const double win  = window_value_radial(d, w, ws, x->param_kaiser_beta, inv_i0beta);
     x->fir[d] = sinc * win;
 
     double D    = std::floor(off);
