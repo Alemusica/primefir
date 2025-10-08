@@ -119,6 +119,15 @@ t_max_err   primefir_attr_set_keys_a(t_primefir* x, void* attr, long ac, t_atom*
 
 // Utilità
 static inline double clamp01(double v) { return (v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v)); }
+static inline double sinx_over_x(double x) {
+  double ax = std::abs(x);
+  if (ax < 1.0e-8) {
+    double x2 = x * x;
+    double x4 = x2 * x2;
+    return 1.0 - x2 / 6.0 + x4 / 120.0;
+  }
+  return std::sin(x) / x;
+}
 void        primefir_make_primes(t_primefir* x, int count_needed);
 
 static int  prime_upper_bound_from_count(int count_needed);
@@ -484,7 +493,7 @@ void primefir_update_kernel(t_primefir* x)
     const bool linear = (static_cast<seq_mode>(x->param_mode) == seq_mode::linear);
     const double off  = linear ? (double)d : seq_value_d(x, d);  // ritardo “tempo” a distanza d
     const double t    = off * f_rel;
-    const double sinc = (t != 0.0) ? std::sin(t) / t : 1.0;
+    const double sinc = sinx_over_x(t);
 
     const double win  = window_value_radial(d, w, ws, x->param_kaiser_beta, inv_i0beta);
     x->fir[d] = sinc * win;
