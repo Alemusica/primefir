@@ -443,6 +443,8 @@ void primefir_update_kernel(t_primefir* x)
   x->ioffs[0] = 0;
   x->ffrac[0] = 0.0;
 
+  const interp_mode imode = static_cast<interp_mode>(x->param_interp);
+
   // Costruzione sinc * finestra radiale su d=1..w-1
   double inv_i0beta = 0.0;
   if (ws == winshape::kaiser) {
@@ -463,6 +465,17 @@ void primefir_update_kernel(t_primefir* x)
     double frac = off - D;
     if (D < 0.0) { D = 0.0; frac = 0.0; }
     if (D >= (double)(kRingSize - 6)) { D = (double)(kRingSize - 6); frac = 0.0; } // margine per farrow5
+    if (imode == interp_mode::catmullrom && D < 1.0) {
+      // Catmull–Rom usa il campione (wi - D + 1); garantiamo D>=1 così non si legge avanti.
+      // Manteniamo l'offset totale spostando la frazione nella stessa storia disponibile.
+      // Nota: se in futuro la sequenza generasse offset < 1, questo guardiano preserva la
+      // precondizione sui campioni richiesti da ring_read_keys4.
+      const double total = D + frac;
+      D = 1.0;
+      frac = total - 1.0;
+      if (frac < 0.0) frac = 0.0;
+      if (frac >= 1.0) frac = std::nextafter(1.0, 0.0);
+    }
     x->ioffs[d] = (uint32_t)D;
     x->ffrac[d] = frac;
   }
