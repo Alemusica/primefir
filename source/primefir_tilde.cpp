@@ -83,10 +83,15 @@ typedef struct _primefir {
   uint32_t    latency;                 // L = max(D) + 1
   double      fir0;                    // tap centrale (d=0)
 
+  double      w_lin     [kMaxWindow + 1][2];
   double      w_lin_fwd [kMaxWindow + 1][2];
+  double      w_lag4    [kMaxWindow + 1][4];
   double      w_lag4_fwd[kMaxWindow + 1][4];
+  double      w_keys    [kMaxWindow + 1][4];
   double      w_keys_fwd[kMaxWindow + 1][4];
+  double      w_far3    [kMaxWindow + 1][4];
   double      w_far3_fwd[kMaxWindow + 1][4];
+  double      w_far5    [kMaxWindow + 1][6];
   double      w_far5_fwd[kMaxWindow + 1][6];
 
   // Primi
@@ -260,10 +265,15 @@ void* primefir_new(t_symbol* s, long argc, t_atom* argv)
   x->dirty         = true;
   x->latency       = 0;
   x->fir0          = 0.0;
+  std::memset(x->w_lin,      0, sizeof(x->w_lin));
   std::memset(x->w_lin_fwd,  0, sizeof(x->w_lin_fwd));
+  std::memset(x->w_lag4,     0, sizeof(x->w_lag4));
   std::memset(x->w_lag4_fwd, 0, sizeof(x->w_lag4_fwd));
+  std::memset(x->w_keys,     0, sizeof(x->w_keys));
   std::memset(x->w_keys_fwd, 0, sizeof(x->w_keys_fwd));
+  std::memset(x->w_far3,     0, sizeof(x->w_far3));
   std::memset(x->w_far3_fwd, 0, sizeof(x->w_far3_fwd));
+  std::memset(x->w_far5,     0, sizeof(x->w_far5));
   std::memset(x->w_far5_fwd, 0, sizeof(x->w_far5_fwd));
 
   x->primes_ready  = false;
@@ -402,9 +412,29 @@ static inline double seq_value_d(const t_primefir* x, int n)
   }
 }
 
+static inline int interp_margin_samples(interp_mode mode)
+{
+  switch (mode) {
+    case interp_mode::linear:    return 1;
+    case interp_mode::lagrange4: return 3;
+    case interp_mode::catmullrom:return 2;
+    case interp_mode::farrow3:   return 3;
+    case interp_mode::farrow5:   return 5;
+    default:                     return 0;
+  }
+}
+
+static inline int interp_latency_margin(interp_mode mode)
+{
+  switch (mode) {
+    case interp_mode::catmullrom: return 2;
+    default:                      return 1;
+  }
+}
+
 // =====================  FINESTRE RADIALI  =====================
 // w(d), d=0..w-1 (picco a d=0, taper verso d=w-1)
-static inline double window_value_radial(int d, int w, winshape ws, double kaiser_beta, double inv_i0beta)
+static inline double window_value_radial(int d, int w, winshape ws, double kaiser_beta)
 {
   const int Dmax = w - 1;
   if (Dmax <= 0) return 1.0;
@@ -438,7 +468,8 @@ static inline double window_value_radial(int d, int w, winshape ws, double kaise
       double r   = (double)d / (double)Dmax;
       double t   = std::sqrt(std::max(0.0, 1.0 - r * r));
       double num = i0_approx(kaiser_beta * t);
-      return (inv_i0beta > 0.0 ? (num * inv_i0beta) : 1.0);
+      double den = i0_approx(kaiser_beta);
+      return (den > 0.0 ? (num / den) : 1.0);
     }
     default: return 1.0;
   }
@@ -449,21 +480,16 @@ void primefir_update_kernel(t_primefir* x)
 {
   const double overall = x->sr / 44100.0;
 
-  // Mappatura "musicale": più risoluzione ai valori bassi
+  // Finestra (mappatura "musicale")
   double ww = std::pow(clamp01(x->param_window), 2.0);
-  int w = (int)std::floor(2 + ww * (kMaxWindow - 2) * overall * 0.5);
-  if (w < 2) w = 2;
-  if (w > kMaxWindow) w = kMaxWindow;
-
+  int w = (int)std::floor(2 + ww * (kMaxWindow - 2) * overall * 1.0);
+  w = std::clamp(w, 2, kMaxWindow);
   x->window = w;
-  x->middle = (int)std::floor(std::sin(std::pow(clamp01(x->param_freq), 2.0) * (M_PI * 0.5)) * 0.5 * (double)w);
 
-  // Frequenza relativa
-  double f = std::pow(clamp01(x->param_freq), 2.0) * (M_PI * 0.5);
-  if (f < 0.0001) f = 0.0001;
-  const double f_rel = f / overall;
+  const interp_mode imode = static_cast<interp_mode>(x->param_interp);
+  const int margin = interp_margin_samples(imode);
 
-  // Primes necessari fino alla massima distanza
+  // Primi necessari
   int need_primes = (static_cast<seq_mode>(x->param_mode) == seq_mode::prime_phi_index)
                     ? std::min(kPrimeTableSize - 1, (int)std::ceil((w - 1) * kPhi) + 8)
                     : std::min(kPrimeTableSize - 1, (w - 1) + 8);
@@ -471,64 +497,156 @@ void primefir_update_kernel(t_primefir* x)
     primefir_make_primes(x, need_primes);
 
   // Reset
-  for (int i = 0; i < w; ++i) { x->fir[i] = 0.0; x->ioffs[i] = 0; x->ffrac[i] = 0.0; }
+  for (int i = 0; i < w; ++i) {
+    x->fir[i] = 0.0;
+    x->ioffs[i] = 0;
+    x->ffrac[i] = 0.0;
+  }
+  x->fir0 = 0.0;
 
   const winshape ws = static_cast<winshape>(x->param_winshape);
+  const bool use_kaiser = (ws == winshape::kaiser);
+  const double beta = x->param_kaiser_beta;
+  const double inv_i0beta = use_kaiser ? ([](double b){ double den = i0_approx(b); return (den > 0.0 ? (1.0 / den) : 0.0); }(beta)) : 1.0;
 
-  // d=0 (centro) non si somma
-  x->fir[0]   = 0.0;
-  x->ioffs[0] = 0;
-  x->ffrac[0] = 0.0;
+  // Low-pass canonico
+  const double fc = 0.5 * std::pow(clamp01(x->param_freq), 2.0);
+  const double two_pi_fc = 2.0 * M_PI * fc;
 
-  const interp_mode imode = static_cast<interp_mode>(x->param_interp);
-
-  // Costruzione sinc * finestra radiale su d=1..w-1
-  double inv_i0beta = 0.0;
-  if (ws == winshape::kaiser) {
-    double den = i0_approx(x->param_kaiser_beta);
-    inv_i0beta = (den > 0.0 ? (1.0 / den) : 0.0);
+  // Tap centrale
+  {
+    double win0 = 1.0;
+    if (!use_kaiser) win0 = window_value_radial(0, w, ws, beta);
+    x->fir0 = 2.0 * fc * win0;
   }
+
+  int Dmax = 0;
+  const int Dmax_allow = std::max(1, (kRingSize - margin - 4) / 2);
 
   for (int d = 1; d < w; ++d) {
     const bool linear = (static_cast<seq_mode>(x->param_mode) == seq_mode::linear);
-    const double off  = linear ? (double)d : seq_value_d(x, d);  // ritardo “tempo” a distanza d
-    const double t    = off * f_rel;
-    const double sinc = sinx_over_x(t);
+    double off = linear ? (double)d : seq_value_d(x, d);
+    if (off < 0.0) off = 0.0;
+    const double t = two_pi_fc * off;
 
-    const double win  = window_value_radial(d, w, ws, x->param_kaiser_beta, inv_i0beta);
-    x->fir[d] = sinc * win;
+    double win;
+    if (use_kaiser) {
+      const int Dmx = w - 1;
+      double r = (Dmx > 0 ? (double)d / (double)Dmx : 0.0);
+      double tt = std::sqrt(std::max(0.0, 1.0 - r * r));
+      win = i0_approx(beta * tt) * inv_i0beta;
+    } else {
+      win = window_value_radial(d, w, ws, beta);
+    }
 
-    double D    = std::floor(off);
+    double coeff = 0.0;
+    if (off > 0.0) {
+      double denom = M_PI * off;
+      coeff = sinx_over_x(t) * ((denom != 0.0) ? (t / denom) : 0.0) * win;
+    }
+    x->fir[d] = coeff;
+
+    double D = std::floor(off);
     double frac = off - D;
     if (D < 0.0) { D = 0.0; frac = 0.0; }
-    if (D >= (double)(kRingSize - 6)) { D = (double)(kRingSize - 6); frac = 0.0; } // margine per farrow5
-    if (imode == interp_mode::catmullrom && D < 1.0) {
-      // Catmull–Rom usa il campione (wi - D + 1); garantiamo D>=1 così non si legge avanti.
-      // Manteniamo l'offset totale spostando la frazione nella stessa storia disponibile.
-      // Nota: se in futuro la sequenza generasse offset < 1, questo guardiano preserva la
-      // precondizione sui campioni richiesti da ring_read_keys4.
-      const double total = D + frac;
-      D = 1.0;
-      frac = total - 1.0;
-      if (frac < 0.0) frac = 0.0;
-      if (frac >= 1.0) frac = std::nextafter(1.0, 0.0);
-    }
+    if (D >= (double)Dmax_allow) { D = (double)Dmax_allow; frac = 0.0; }
+    if (imode == interp_mode::off) frac = 0.0;
     x->ioffs[d] = (uint32_t)D;
     x->ffrac[d] = frac;
+
+    if ((int)D > Dmax) Dmax = (int)D;
   }
 
-  // Calibrazione (come tua logica originale)
-  const double calib = (static_cast<seq_mode>(x->param_mode) == seq_mode::linear) ? 0.25 : 0.5;
+  // Precompute pesi di interpolazione
+  switch (imode) {
+    case interp_mode::linear:
+      for (int d = 1; d < w; ++d) {
+        double f = x->ffrac[d];
+        x->w_lin[d][0] = 1.0 - f;
+        x->w_lin[d][1] = f;
+        x->w_lin_fwd[d][0] = f;
+        x->w_lin_fwd[d][1] = 1.0 - f;
+      }
+      break;
 
-  // Normalizzazione L1 dei tap (d>=1)
-  double l1 = 0.0;
-  for (int d = 1; d < w; ++d) l1 += std::abs(x->fir[d]);
-  if (l1 < 1e-12) l1 = 1.0;
+    case interp_mode::lagrange4: {
+      auto mk = [](double mu, double* wv) {
+        double m2 = mu * mu;
+        double m3 = m2 * mu;
+        wv[0] = -m3 * (1.0/6.0) + m2 - (11.0/6.0) * mu + 1.0;
+        wv[1] =  m3 * 0.5       - (5.0/2.0) * m2 + 3.0 * mu;
+        wv[2] = -m3 * 0.5       + 2.0 * m2 - 1.5 * mu;
+        wv[3] =  m3 * (1.0/6.0) - 0.5 * m2 + (1.0/3.0) * mu;
+      };
+      for (int d = 1; d < w; ++d) {
+        double f = x->ffrac[d];
+        mk(f,            x->w_lag4[d]);
+        mk(1.0 - f,      x->w_lag4_fwd[d]);
+      }
+    } break;
 
-  const double norm  = x->param_normalize ? (1.0 / l1) : 1.0;
-  const double gcomp = x->param_gaincomp ? std::sqrt(f_rel) : 1.0;
+    case interp_mode::catmullrom: {
+      const double a = x->param_keys_a;
+      for (int d = 1; d < w; ++d) {
+        double f = x->ffrac[d];
+        double mu_back = 1.0 - f;
+        x->w_keys[d][0] = keys_h(a, 1.0 + mu_back);
+        x->w_keys[d][1] = keys_h(a, mu_back);
+        x->w_keys[d][2] = keys_h(a, 1.0 - mu_back);
+        x->w_keys[d][3] = keys_h(a, 2.0 - mu_back);
 
-  x->post_scale = calib * norm * gcomp;
+        double mu_fwd = f;
+        x->w_keys_fwd[d][0] = keys_h(a, 1.0 + mu_fwd);
+        x->w_keys_fwd[d][1] = keys_h(a, mu_fwd);
+        x->w_keys_fwd[d][2] = keys_h(a, 1.0 - mu_fwd);
+        x->w_keys_fwd[d][3] = keys_h(a, 2.0 - mu_fwd);
+      }
+    } break;
+
+    case interp_mode::farrow3:
+    case interp_mode::farrow5: {
+      const int P = (imode == interp_mode::farrow3 ? 3 : 5);
+      static const double fact[] = {1,1,2,6,24,120,720};
+      auto denom = [&](int k) {
+        double d = fact[k] * fact[P - k];
+        if (((P - k) & 1) != 0) d = -d;
+        return d;
+      };
+      double denom_k[6];
+      for (int k = 0; k <= P; ++k) denom_k[k] = denom(k);
+      auto make = [&](double mu, double* wv) {
+        for (int k = 0; k <= P; ++k) {
+          double num = 1.0;
+          for (int m = 0; m <= P; ++m) if (m != k) num *= (mu - (double)m);
+          wv[k] = num / denom_k[k];
+        }
+      };
+      for (int d = 1; d < w; ++d) {
+        if (imode == interp_mode::farrow3) {
+          make(x->ffrac[d],      x->w_far3[d]);
+          make(1.0 - x->ffrac[d],x->w_far3_fwd[d]);
+        } else {
+          make(x->ffrac[d],      x->w_far5[d]);
+          make(1.0 - x->ffrac[d],x->w_far5_fwd[d]);
+        }
+      }
+    } break;
+
+    default: break;
+  }
+
+  x->middle = Dmax;
+  x->latency = (uint32_t)(Dmax + interp_latency_margin(imode));
+
+  // Normalizzazione DC
+  double dc = x->fir0;
+  for (int d = 1; d < w; ++d) dc += 2.0 * x->fir[d];
+  if (std::abs(dc) < 1e-12) dc = 1.0;
+
+  const double norm  = x->param_normalize ? (1.0 / dc) : 1.0;
+  const double gcomp = x->param_gaincomp ? 1.0 : 1.0;
+
+  x->post_scale = norm * gcomp;
   x->dirty = false;
 }
 
@@ -619,6 +737,34 @@ static inline double ring_read_farrow_generic(const double* ring, uint32_t wi, u
   return acc;
 }
 
+static inline double ring_apply_rev(const double* ring, uint32_t base, const double* w, int count)
+{
+  double acc = 0.0;
+  for (int i = 0; i < count; ++i) {
+    uint32_t idx = (base - (uint32_t)i) & kRingMask;
+    acc += w[i] * ring[idx];
+  }
+  return acc;
+}
+
+static inline double ring_apply_keys_back(const double* ring, uint32_t base, const double* w)
+{
+  uint32_t im1 = (base - 1u) & kRingMask;
+  uint32_t i0  = base & kRingMask;
+  uint32_t ip1 = (base + 1u) & kRingMask;
+  uint32_t ip2 = (base + 2u) & kRingMask;
+  return w[0]*ring[im1] + w[1]*ring[i0] + w[2]*ring[ip1] + w[3]*ring[ip2];
+}
+
+static inline double ring_apply_keys_fwd(const double* ring, uint32_t base, const double* w)
+{
+  uint32_t im1 = (base - 1u) & kRingMask;
+  uint32_t i0  = base & kRingMask;
+  uint32_t ip1 = (base + 1u) & kRingMask;
+  uint32_t ip2 = (base + 2u) & kRingMask;
+  return w[0]*ring[im1] + w[1]*ring[i0] + w[2]*ring[ip1] + w[3]*ring[ip2];
+}
+
 void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
                         double** outs, long numouts, long sampleframes, long, void*)
 {
@@ -636,7 +782,8 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
   const int w = x->window;
   const double scale = x->post_scale;
   const interp_mode imode = static_cast<interp_mode>(x->param_interp);
-  const double keys_a = x->param_keys_a;
+  const uint32_t latency = x->latency;
+  const double fir0 = x->fir0;
 
   uint32_t wi = x->write_idx;
 
@@ -648,48 +795,83 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
     x->ringL[wi] = sL;
     x->ringR[wi] = sR;
 
-    double accL = 0.0, accR = 0.0;
+    uint32_t ri = (wi - latency) & kRingMask;
+
+    double accL = fir0 * x->ringL[ri];
+    double accR = fir0 * x->ringR[ri];
 
     for (int d = 1; d < w; ++d) {
-      const uint32_t D = x->ioffs[d];
-      const double   f = x->ffrac[d];
+      const double c = x->fir[d];
+      if (c == 0.0) continue;
 
-      double vL, vR;
+      const uint32_t D = x->ioffs[d];
+
+      double vbL = 0.0, vbR = 0.0;
+      double vfL = 0.0, vfR = 0.0;
+
       switch (imode) {
-        case interp_mode::linear:
-          vL = ring_read_linear(x->ringL, wi, D, f);
-          vR = ring_read_linear(x->ringR, wi, D, f);
-          break;
-        case interp_mode::lagrange4:
-          vL = ring_read_lagrange4(x->ringL, wi, D, f);
-          vR = ring_read_lagrange4(x->ringR, wi, D, f);
-          break;
-        case interp_mode::catmullrom:
-          vL = ring_read_keys4(x->ringL, wi, D, f, keys_a);
-          vR = ring_read_keys4(x->ringR, wi, D, f, keys_a);
-          break;
-        case interp_mode::farrow3:
-          vL = ring_read_farrow_generic(x->ringL, wi, D, f, 3); // P=3 (4 tap)
-          vR = ring_read_farrow_generic(x->ringR, wi, D, f, 3);
-          break;
-        case interp_mode::farrow5:
-          vL = ring_read_farrow_generic(x->ringL, wi, D, f, 5); // P=5 (6 tap)
-          vR = ring_read_farrow_generic(x->ringR, wi, D, f, 5);
-          break;
-        default: { // off
-          uint32_t idx = (wi - D) & kRingMask;
-          vL = x->ringL[idx];
-          vR = x->ringR[idx];
+        case interp_mode::linear: {
+          uint32_t base_b = (ri - D) & kRingMask;
+          uint32_t base_f = (ri + D + 1u) & kRingMask;
+          vbL = ring_apply_rev(x->ringL, base_b, x->w_lin[d], 2);
+          vbR = ring_apply_rev(x->ringR, base_b, x->w_lin[d], 2);
+          vfL = ring_apply_rev(x->ringL, base_f, x->w_lin_fwd[d], 2);
+          vfR = ring_apply_rev(x->ringR, base_f, x->w_lin_fwd[d], 2);
+        } break;
+
+        case interp_mode::lagrange4: {
+          uint32_t base_b = (ri - D) & kRingMask;
+          uint32_t base_f = (ri + D + 1u) & kRingMask;
+          vbL = ring_apply_rev(x->ringL, base_b, x->w_lag4[d], 4);
+          vbR = ring_apply_rev(x->ringR, base_b, x->w_lag4[d], 4);
+          vfL = ring_apply_rev(x->ringL, base_f, x->w_lag4_fwd[d], 4);
+          vfR = ring_apply_rev(x->ringR, base_f, x->w_lag4_fwd[d], 4);
+        } break;
+
+        case interp_mode::catmullrom: {
+          uint32_t base_b = (ri - D - 1u) & kRingMask;
+          uint32_t base_f = (ri + D) & kRingMask;
+          vbL = ring_apply_keys_back(x->ringL, base_b, x->w_keys[d]);
+          vbR = ring_apply_keys_back(x->ringR, base_b, x->w_keys[d]);
+          vfL = ring_apply_keys_fwd(x->ringL, base_f, x->w_keys_fwd[d]);
+          vfR = ring_apply_keys_fwd(x->ringR, base_f, x->w_keys_fwd[d]);
+        } break;
+
+        case interp_mode::farrow3: {
+          uint32_t base_b = (ri - D) & kRingMask;
+          uint32_t base_f = (ri + D + 1u) & kRingMask;
+          vbL = ring_apply_rev(x->ringL, base_b, x->w_far3[d], 4);
+          vbR = ring_apply_rev(x->ringR, base_b, x->w_far3[d], 4);
+          vfL = ring_apply_rev(x->ringL, base_f, x->w_far3_fwd[d], 4);
+          vfR = ring_apply_rev(x->ringR, base_f, x->w_far3_fwd[d], 4);
+        } break;
+
+        case interp_mode::farrow5: {
+          uint32_t base_b = (ri - D) & kRingMask;
+          uint32_t base_f = (ri + D + 1u) & kRingMask;
+          vbL = ring_apply_rev(x->ringL, base_b, x->w_far5[d], 6);
+          vbR = ring_apply_rev(x->ringR, base_b, x->w_far5[d], 6);
+          vfL = ring_apply_rev(x->ringL, base_f, x->w_far5_fwd[d], 6);
+          vfR = ring_apply_rev(x->ringR, base_f, x->w_far5_fwd[d], 6);
+        } break;
+
+        default: {
+          uint32_t idx_b = (ri - D) & kRingMask;
+          uint32_t idx_f = (ri + D) & kRingMask;
+          vbL = x->ringL[idx_b];
+          vbR = x->ringR[idx_b];
+          vfL = x->ringL[idx_f];
+          vfR = x->ringR[idx_f];
         } break;
       }
 
-      // robustezza numerica (rari casi estremi)
-      if (!std::isfinite(vL)) vL = 0.0;
-      if (!std::isfinite(vR)) vR = 0.0;
+      if (!std::isfinite(vbL)) vbL = 0.0;
+      if (!std::isfinite(vbR)) vbR = 0.0;
+      if (!std::isfinite(vfL)) vfL = 0.0;
+      if (!std::isfinite(vfR)) vfR = 0.0;
 
-      const double c = x->fir[d];
-      accL += vL * c;
-      accR += vR * c;
+      accL += c * (vbL + vfL);
+      accR += c * (vbR + vfR);
     }
 
     outL[n] = accL * scale;
