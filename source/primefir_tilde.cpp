@@ -138,6 +138,7 @@ void        primefir_make_primes(t_primefir* x, int count_needed);
 static int  prime_upper_bound_from_count(int count_needed);
 void        primefir_update_kernel(t_primefir* x);
 
+// Forward declaration per l'uso in primefir_update_kernel()
 static inline double keys_h(double a, double x);
 
 // Bessel I0 (Kaiser)
@@ -481,6 +482,7 @@ static inline double window_value_radial(int d, int w, winshape ws, double kaise
 void primefir_update_kernel(t_primefir* x)
 {
   const double overall = x->sr / 44100.0;
+  const bool do_linphase = (x->param_linphase != 0);
 
   // Finestra (mappatura "musicale")
   double ww = std::pow(clamp01(x->param_window), 2.0);
@@ -512,7 +514,8 @@ void primefir_update_kernel(t_primefir* x)
   const double inv_i0beta = use_kaiser ? ([](double b){ double den = i0_approx(b); return (den > 0.0 ? (1.0 / den) : 0.0); }(beta)) : 1.0;
 
   // Low-pass canonico
-  const double fc = 0.5 * std::pow(clamp01(x->param_freq), 2.0);
+  const double freq_knob = clamp01(x->param_freq);
+  const double fc = 0.5 * std::pow(freq_knob, 2.0);
   const double two_pi_fc = 2.0 * M_PI * fc;
 
   // Tap centrale
@@ -638,7 +641,9 @@ void primefir_update_kernel(t_primefir* x)
   }
 
   x->middle = Dmax;
-  x->latency = (uint32_t)(Dmax + interp_latency_margin(imode));
+  // Latenza: lineare = centro (lookahead), causale = solo margine interp.
+  x->latency = (uint32_t)(do_linphase ? (Dmax + interp_latency_margin(imode))
+                                      : std::max(1, interp_margin_samples(imode)));
 
   // Normalizzazione DC
   double dc = x->fir0;
@@ -646,7 +651,8 @@ void primefir_update_kernel(t_primefir* x)
   if (std::abs(dc) < 1e-12) dc = 1.0;
 
   const double norm  = x->param_normalize ? (1.0 / dc) : 1.0;
-  const double gcomp = x->param_gaincomp ? 1.0 : 1.0;
+  // "Gain Compensation sqrt(freq)" sul controllo [0..1]
+  const double gcomp = x->param_gaincomp ? std::sqrt(std::max(1.0e-12, freq_knob)) : 1.0;
 
   x->post_scale = norm * gcomp;
   x->dirty = false;
@@ -786,6 +792,7 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
   const interp_mode imode = static_cast<interp_mode>(x->param_interp);
   const uint32_t latency = x->latency;
   const double fir0 = x->fir0;
+  const bool do_linphase = (x->param_linphase != 0);
 
   uint32_t wi = x->write_idx;
 
@@ -872,8 +879,14 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
       if (!std::isfinite(vfL)) vfL = 0.0;
       if (!std::isfinite(vfR)) vfR = 0.0;
 
-      accL += c * (vbL + vfL);
-      accR += c * (vbR + vfR);
+      if (do_linphase) {
+        accL += c * (vbL + vfL);
+        accR += c * (vbR + vfR);
+      } else {
+        // causale: usa solo il lato "passato" e raddoppia il peso dei pari
+        accL += (2.0 * c) * vbL;
+        accR += (2.0 * c) * vbR;
+      }
     }
 
     outL[n] = accL * scale;
