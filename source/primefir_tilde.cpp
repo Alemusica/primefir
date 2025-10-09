@@ -457,23 +457,21 @@ static inline int interp_latency_margin(interp_mode mode)
 
 // =====================  FINESTRE RADIALI  =====================
 // w(d), d=0..w-1 (picco a d=0, taper verso d=w-1)
-static inline double window_value_radial(int d, int w, winshape ws, double kaiser_beta)
+static inline double window_value_distance(double ratio, winshape ws, double kaiser_beta)
 {
-  const int Dmax = w - 1;
-  if (Dmax <= 0) return 1.0;
-
-  const double th = M_PI * (double)d / (double)Dmax;  // 0..π
+  double r = std::clamp(ratio, 0.0, 1.0);
+  double th = M_PI * r;  // 0..π
   switch (ws) {
     case winshape::hann: {
-      // 0.5 * (1 + cos(π d/Dmax))
+      // 0.5 * (1 + cos(π r))
       return 0.5 * (1.0 + std::cos(th));
     }
     case winshape::hamming: {
-      // 0.54 + 0.46 * cos(π d/Dmax)
+      // 0.54 + 0.46 * cos(π r)
       return 0.54 + 0.46 * std::cos(th);
     }
     case winshape::blackman: {
-      // 0.42 + 0.5*cos(π d/Dmax) + 0.08*cos(2π d/Dmax)
+      // 0.42 + 0.5*cos(π r) + 0.08*cos(2π r)
       return 0.42 + 0.5 * std::cos(th) + 0.08 * std::cos(2.0 * th);
     }
     case winshape::blackmanharris: {
@@ -487,8 +485,7 @@ static inline double window_value_radial(int d, int w, winshape ws, double kaise
       return a0 + a1*std::cos(th) + a2*std::cos(2.0*th) + a3*std::cos(3.0*th);
     }
     case winshape::kaiser: {
-      // I0(β * sqrt(1 - (d/Dmax)^2)) / I0(β)
-      double r   = (double)d / (double)Dmax;
+      // I0(β * sqrt(1 - r^2)) / I0(β)
       double t   = std::sqrt(std::max(0.0, 1.0 - r * r));
       double num = i0_approx(kaiser_beta * t);
       double den = i0_approx(kaiser_beta);
@@ -540,32 +537,49 @@ void primefir_update_kernel(t_primefir* x)
 
   // Tap centrale
   {
-    double win0 = 1.0;
-    if (!use_kaiser) win0 = window_value_radial(0, w, ws, beta);
+    double win0 = use_kaiser ? 1.0 : window_value_distance(0.0, ws, beta);
     x->fir0 = 2.0 * fc * win0;
   }
 
   int Dmax = 0;
   const int Dmax_allow = std::max(1, (kRingSize - margin - 4) / 2);
+  const bool linear = (static_cast<seq_mode>(x->param_mode) == seq_mode::linear);
+
+  std::vector<double> off_raw(w, 0.0);
+  std::vector<double> off_clamped(w, 0.0);
+  double off_max_raw = 0.0;
 
   for (int d = 1; d < w; ++d) {
-    const bool linear = (static_cast<seq_mode>(x->param_mode) == seq_mode::linear);
     double off = linear ? (double)d : seq_value_d(x, d);
     if (off < 0.0) off = 0.0;
-    const double t = two_pi_fc * off;
+    off_raw[d] = off;
+    if (off > off_max_raw) off_max_raw = off;
+
+    double off_use = off;
+    if (off_use > (double)Dmax_allow) off_use = (double)Dmax_allow;
+    off_clamped[d] = off_use;
+  }
+
+  if (!(off_max_raw > 0.0)) {
+    off_max_raw = 1.0;
+  }
+
+  for (int d = 1; d < w; ++d) {
+    const double off_raw_value = off_raw[d];
+    double off = off_clamped[d];
+    const double ratio = std::clamp(off_raw_value / off_max_raw, 0.0, 1.0);
 
     double win;
     if (use_kaiser) {
-      const int Dmx = w - 1;
-      double r = (Dmx > 0 ? (double)d / (double)Dmx : 0.0);
-      double tt = std::sqrt(std::max(0.0, 1.0 - r * r));
+      double tt = std::sqrt(std::max(0.0, 1.0 - ratio * ratio));
       win = i0_approx(beta * tt) * inv_i0beta;
     } else {
-      win = window_value_radial(d, w, ws, beta);
+      win = window_value_distance(ratio, ws, beta);
     }
 
     double coeff = 0.0;
     if (off > 0.0) {
+      double t = two_pi_fc * off;
       double denom = M_PI * off;
       coeff = sinx_over_x(t) * ((denom != 0.0) ? (t / denom) : 0.0) * win;
     }
