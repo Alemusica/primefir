@@ -264,13 +264,13 @@ void* primefir_new(t_symbol* s, long argc, t_atom* argv)
 
   x->sr              = sys_getsr(); if (x->sr <= 0) x->sr = 44100.0;
   x->param_freq      = 1.0;
-  x->param_window    = 1.0;
+  x->param_window    = 0.25;                         // compromesso: ~257 tap @44.1k, buon bilancio qualità/CPU
   x->param_mode      = (long)seq_mode::prime;
   x->param_normalize = 0;
   x->param_gaincomp  = 1;
   x->param_linphase  = 0;
 
-  x->param_interp    = (long)interp_mode::farrow5;    // default: massima qualità
+  x->param_interp    = (long)interp_mode::linear;      // default: più leggero, buona trasparenza
   x->param_winshape  = (long)winshape::blackmanharris;// default: BH 4-term
   x->param_kaiser_beta = 9.5;
   x->param_keys_a    = -0.5;
