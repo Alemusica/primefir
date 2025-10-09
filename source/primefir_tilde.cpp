@@ -78,6 +78,7 @@ typedef struct _primefir {
   double      fir[kMaxWindow + 1];     // fir[d], d=0..w-1 (d=0 non sommato)
   uint32_t    ioffs[kMaxWindow + 1];   // parte intera del ritardo per d
   double      ffrac[kMaxWindow + 1];   // frazione [0,1) per d
+  double      offv[kMaxWindow + 1];    // offset assoluti calcolati per d
   double      post_scale;
   bool        dirty;
   uint32_t    latency;                 // L = max(D) + 1
@@ -521,6 +522,7 @@ void primefir_update_kernel(t_primefir* x)
     primefir_make_primes(x, need_primes);
 
   // Reset
+  std::fill(std::begin(x->offv), std::end(x->offv), 0.0);
   for (int i = 0; i < w; ++i) {
     x->fir[i] = 0.0;
     x->ioffs[i] = 0;
@@ -548,10 +550,13 @@ void primefir_update_kernel(t_primefir* x)
   int Dmax = 0;
   const int Dmax_allow = std::max(1, (kRingSize - margin - 4) / 2);
 
+  x->offv[0] = 0.0;
+
   for (int d = 1; d < w; ++d) {
     const bool linear = (static_cast<seq_mode>(x->param_mode) == seq_mode::linear);
     double off = linear ? (double)d : seq_value_d(x, d);
     if (off < 0.0) off = 0.0;
+    x->offv[d] = off;
     const double t = two_pi_fc * off;
 
     double win;
