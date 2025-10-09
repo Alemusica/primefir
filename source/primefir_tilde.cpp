@@ -124,6 +124,26 @@ t_max_err   primefir_attr_set_keys_a(t_primefir* x, void* attr, long ac, t_atom*
 
 // Utilità
 static inline double clamp01(double v) { return (v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v)); }
+static inline double clamp_mu01(double mu) {
+  // evita gli estremi esatti dove le polinomiali possono amplificare il rumore
+  const double eps = 1.0e-9;
+  return (mu <= eps ? eps : (mu >= 1.0 - eps ? 1.0 - eps : mu));
+}
+static inline void norm2(double w[2]) {
+  double s = w[0] + w[1];
+  if (!std::isfinite(s) || std::abs(s) < 1e-30) { w[0] = 1.0; w[1] = 0.0; return; }
+  double inv = 1.0 / s; w[0] *= inv; w[1] *= inv;
+}
+static inline void norm4(double w[4]) {
+  double s = w[0] + w[1] + w[2] + w[3];
+  if (!std::isfinite(s) || std::abs(s) < 1e-30) { w[0]=1.0; w[1]=w[2]=w[3]=0.0; return; }
+  double inv = 1.0 / s; for (int i=0;i<4;++i) w[i] *= inv;
+}
+static inline void norm6(double w[6]) {
+  double s = 0.0; for (int i=0;i<6;++i) s += w[i];
+  if (!std::isfinite(s) || std::abs(s) < 1.0e-30) { w[0]=1.0; for (int i=1;i<6;++i) w[i]=0.0; return; }
+  double inv = 1.0 / s; for (int i=0;i<6;++i) w[i] *= inv;
+}
 static inline double sinx_over_x(double x) {
   double ax = std::abs(x);
   if (ax < 1.0e-8) {
@@ -566,16 +586,19 @@ void primefir_update_kernel(t_primefir* x)
   switch (imode) {
     case interp_mode::linear:
       for (int d = 1; d < w; ++d) {
-        double f = x->ffrac[d];
+        double f = clamp_mu01(x->ffrac[d]);
         x->w_lin[d][0] = 1.0 - f;
         x->w_lin[d][1] = f;
         x->w_lin_fwd[d][0] = f;
         x->w_lin_fwd[d][1] = 1.0 - f;
+        norm2(x->w_lin[d]);
+        norm2(x->w_lin_fwd[d]);
       }
       break;
 
     case interp_mode::lagrange4: {
       auto mk = [](double mu, double* wv) {
+        mu = clamp_mu01(mu);
         double m2 = mu * mu;
         double m3 = m2 * mu;
         wv[0] = -m3 * (1.0/6.0) + m2 - (11.0/6.0) * mu + 1.0;
@@ -584,16 +607,18 @@ void primefir_update_kernel(t_primefir* x)
         wv[3] =  m3 * (1.0/6.0) - 0.5 * m2 + (1.0/3.0) * mu;
       };
       for (int d = 1; d < w; ++d) {
-        double f = x->ffrac[d];
+        double f = clamp_mu01(x->ffrac[d]);
         mk(f,            x->w_lag4[d]);
         mk(1.0 - f,      x->w_lag4_fwd[d]);
+        norm4(x->w_lag4[d]);
+        norm4(x->w_lag4_fwd[d]);
       }
     } break;
 
     case interp_mode::catmullrom: {
       const double a = x->param_keys_a;
       for (int d = 1; d < w; ++d) {
-        double f = x->ffrac[d];
+        double f = clamp_mu01(x->ffrac[d]);
         double mu_back = 1.0 - f;
         x->w_keys[d][0] = keys_h(a, 1.0 + mu_back);
         x->w_keys[d][1] = keys_h(a, mu_back);
@@ -605,6 +630,8 @@ void primefir_update_kernel(t_primefir* x)
         x->w_keys_fwd[d][1] = keys_h(a, mu_fwd);
         x->w_keys_fwd[d][2] = keys_h(a, 1.0 - mu_fwd);
         x->w_keys_fwd[d][3] = keys_h(a, 2.0 - mu_fwd);
+        norm4(x->w_keys[d]);
+        norm4(x->w_keys_fwd[d]);
       }
     } break;
 
@@ -620,6 +647,7 @@ void primefir_update_kernel(t_primefir* x)
       double denom_k[6];
       for (int k = 0; k <= P; ++k) denom_k[k] = denom(k);
       auto make = [&](double mu, double* wv) {
+        mu = clamp_mu01(mu);
         for (int k = 0; k <= P; ++k) {
           double num = 1.0;
           for (int m = 0; m <= P; ++m) if (m != k) num *= (mu - (double)m);
@@ -630,9 +658,13 @@ void primefir_update_kernel(t_primefir* x)
         if (imode == interp_mode::farrow3) {
           make(x->ffrac[d],      x->w_far3[d]);
           make(1.0 - x->ffrac[d],x->w_far3_fwd[d]);
+          norm4(x->w_far3[d]);
+          norm4(x->w_far3_fwd[d]);
         } else {
           make(x->ffrac[d],      x->w_far5[d]);
           make(1.0 - x->ffrac[d],x->w_far5_fwd[d]);
+          norm6(x->w_far5[d]);
+          norm6(x->w_far5_fwd[d]);
         }
       }
     } break;
