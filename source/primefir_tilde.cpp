@@ -138,6 +138,8 @@ void        primefir_make_primes(t_primefir* x, int count_needed);
 static int  prime_upper_bound_from_count(int count_needed);
 void        primefir_update_kernel(t_primefir* x);
 
+static inline double keys_h(double a, double x);
+
 // Bessel I0 (Kaiser)
 static inline double i0_approx(double x) {
   double ax = std::abs(x);
