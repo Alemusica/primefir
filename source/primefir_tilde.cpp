@@ -372,6 +372,7 @@ t_max_err primefir_attr_set_interp(t_primefir* x, void*, long ac, t_atom* av) {
     } else {
       long m = atom_getlong(av); if (m < 0) m = 0; if (m > 5) m = 5; x->param_interp = m;
     }
+    x->dirty = true;
   }
   return MAX_ERR_NONE;
 }
@@ -399,7 +400,7 @@ t_max_err primefir_attr_set_kaiser_beta(t_primefir* x, void*, long ac, t_atom* a
   return MAX_ERR_NONE;
 }
 t_max_err primefir_attr_set_keys_a(t_primefir* x, void*, long ac, t_atom* av) {
-  if (ac && av) { x->param_keys_a = atom_getfloat(av); }
+  if (ac && av) { x->param_keys_a = atom_getfloat(av); x->dirty = true; }
   return MAX_ERR_NONE;
 }
 
@@ -801,16 +802,7 @@ static inline double ring_apply_rev(const double* ring, uint32_t base, const dou
   return acc;
 }
 
-static inline double ring_apply_keys_back(const double* ring, uint32_t base, const double* w)
-{
-  uint32_t im1 = (base - 1u) & kRingMask;
-  uint32_t i0  = base & kRingMask;
-  uint32_t ip1 = (base + 1u) & kRingMask;
-  uint32_t ip2 = (base + 2u) & kRingMask;
-  return w[0]*ring[im1] + w[1]*ring[i0] + w[2]*ring[ip1] + w[3]*ring[ip2];
-}
-
-static inline double ring_apply_keys_fwd(const double* ring, uint32_t base, const double* w)
+static inline double ring_apply_keys(const double* ring, uint32_t base, const double* w)
 {
   uint32_t im1 = (base - 1u) & kRingMask;
   uint32_t i0  = base & kRingMask;
@@ -886,10 +878,10 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
         case interp_mode::catmullrom: {
           uint32_t base_b = (ri - D - 1u) & kRingMask;
           uint32_t base_f = (ri + D) & kRingMask;
-          vbL = ring_apply_keys_back(x->ringL, base_b, x->w_keys[d]);
-          vbR = ring_apply_keys_back(x->ringR, base_b, x->w_keys[d]);
-          vfL = ring_apply_keys_fwd(x->ringL, base_f, x->w_keys_fwd[d]);
-          vfR = ring_apply_keys_fwd(x->ringR, base_f, x->w_keys_fwd[d]);
+          vbL = ring_apply_keys(x->ringL, base_b, x->w_keys[d]);
+          vbR = ring_apply_keys(x->ringR, base_b, x->w_keys[d]);
+          vfL = ring_apply_keys(x->ringL, base_f, x->w_keys_fwd[d]);
+          vfR = ring_apply_keys(x->ringR, base_f, x->w_keys_fwd[d]);
         } break;
 
         case interp_mode::farrow3: {
