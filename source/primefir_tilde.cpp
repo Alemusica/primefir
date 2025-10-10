@@ -269,6 +269,7 @@ extern "C" int C74_EXPORT main(void)
   CLASS_ATTR_DOUBLE(c,  "linmix_ms", 0, t_primefir, param_linmix_ms);
   CLASS_ATTR_ACCESSORS(c, "linmix_ms", NULL, primefir_attr_set_linmix_ms);
   CLASS_ATTR_LABEL(c,  "linmix_ms", 0, "Lin-Phase Fade (ms, 0=latency)");
+  CLASS_ATTR_FILTER_CLIP(c, "linmix_ms", 0.0, 5000.0);
 
   class_register(CLASS_BOX, c);
   s_primefir_class = c;
@@ -345,7 +346,6 @@ void primefir_assist(t_primefir* x, void* b, long m, long a, char* s)
 }
 
 // =====================  ATTR SETTERS  =====================
-static inline double clamp01(double v);
 t_max_err primefir_attr_set_freq(t_primefir* x, void*, long ac, t_atom* av) {
   if (ac && av) { x->param_freq = clamp01(atom_getfloat(av)); x->dirty = true; }
   return MAX_ERR_NONE;
