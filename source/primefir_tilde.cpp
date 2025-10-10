@@ -109,6 +109,7 @@ void        primefir_clear(t_primefir* x);
 void        primefir_dsp64(t_primefir* x, t_object* dsp64, short* count, double sr, long n, long flags);
 void        primefir_perform64(t_primefir* x, t_object* dsp64, double** ins, long numins,
                                double** outs, long numouts, long sampleframes, long flags, void* userparam);
+void        primefir_getlatency(t_primefir* x);
 
 // Attributi
 t_max_err   primefir_attr_set_freq(t_primefir* x, void* attr, long ac, t_atom* av);
@@ -190,6 +191,7 @@ extern "C" int C74_EXPORT main(void)
   class_addmethod(c, (method)primefir_assist, "assist", A_CANT, 0);
   class_addmethod(c, (method)primefir_clear,  "clear",  0);
   class_addmethod(c, (method)primefir_dsp64,  "dsp64",  A_CANT, 0);
+  class_addmethod(c, (method)primefir_getlatency, "getlatency", 0);
   class_dspinit(c);
 
   // ===== Attributi =====
@@ -933,6 +935,15 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
     wi = (wi + 1u) & kRingMask;
   }
   x->write_idx = wi;
+}
+
+// =====================  GETTER LATENZA  =====================
+void primefir_getlatency(t_primefir* x)
+{
+  const double fs = (x->sr > 0.0 ? x->sr : 44100.0);
+  const double ms = (1000.0 * static_cast<double>(x->latency)) / fs;
+  object_post(reinterpret_cast<t_object*>(x), "primefir~ latency: %u samples (%.3f ms)",
+              static_cast<unsigned>(x->latency), ms);
 }
 
 // =====================  PRIMI (sieve)  =====================
