@@ -98,6 +98,15 @@ typedef struct _primefir {
   int         primes[kPrimeTableSize]; // primes[1..primes_count]
   int         primes_count;
   bool        primes_ready;
+
+  // ===== Linear-phase crossfade (onset-safe) =====
+  // Simmetrizzazione graduale che preserva l’unità all’inizio
+  // (niente pre‑ringing dopo clear/attivazione/variazione kernel).
+  char        param_linmix_auto;   // 0/1: abilita rampa automatica
+  double      param_linmix_ms;     // durata rampa in ms (0 = usa latency)
+  double      linmix;              // 0..1 quota corrente di lin-phase
+  uint32_t    linmix_ramp_left;    // campioni residui di rampa
+  uint32_t    linmix_ramp_len;     // durata rampa (campioni)
 } t_primefir;
 
 // =====================  PROTOTIPI  =====================
@@ -110,6 +119,9 @@ void        primefir_dsp64(t_primefir* x, t_object* dsp64, short* count, double 
 void        primefir_perform64(t_primefir* x, t_object* dsp64, double** ins, long numins,
                                double** outs, long numouts, long sampleframes, long flags, void* userparam);
 void        primefir_getlatency(t_primefir* x);
+// Attributi onset-safe linear-phase
+t_max_err   primefir_attr_set_linmix_auto(t_primefir* x, void* attr, long ac, t_atom* av);
+t_max_err   primefir_attr_set_linmix_ms(t_primefir* x, void* attr, long ac, t_atom* av);
 
 // Attributi
 t_max_err   primefir_attr_set_freq(t_primefir* x, void* attr, long ac, t_atom* av);
@@ -249,6 +261,15 @@ extern "C" int C74_EXPORT main(void)
   CLASS_ATTR_ACCESSORS(c, "keys_a", NULL, primefir_attr_set_keys_a);
   CLASS_ATTR_LABEL(c,  "keys_a",    0, "Keys cubic 'a' (Catmull-Rom = -0.5)");
 
+  // ===== Linear-phase mix (onset-safe) =====
+  CLASS_ATTR_CHAR(c,    "linmix_auto", 0, t_primefir, param_linmix_auto);
+  CLASS_ATTR_ACCESSORS(c, "linmix_auto", NULL, primefir_attr_set_linmix_auto);
+  CLASS_ATTR_STYLE_LABEL(c, "linmix_auto", 0, "onoff", "Auto fade-in Linear-Phase (0/1)");
+
+  CLASS_ATTR_DOUBLE(c,  "linmix_ms", 0, t_primefir, param_linmix_ms);
+  CLASS_ATTR_ACCESSORS(c, "linmix_ms", NULL, primefir_attr_set_linmix_ms);
+  CLASS_ATTR_LABEL(c,  "linmix_ms", 0, "Lin-Phase Fade (ms, 0=latency)");
+
   class_register(CLASS_BOX, c);
   s_primefir_class = c;
   return 0;
@@ -276,6 +297,13 @@ void* primefir_new(t_symbol* s, long argc, t_atom* argv)
   x->param_winshape  = (long)winshape::blackmanharris;// default: BH 4-term
   x->param_kaiser_beta = 9.5;
   x->param_keys_a    = -0.5;
+
+  // Linear-phase crossfade (onset-safe)
+  x->param_linmix_auto = 1;
+  x->param_linmix_ms   = 0.0;  // 0 => usa latency
+  x->linmix            = 0.0;
+  x->linmix_ramp_left  = 0;
+  x->linmix_ramp_len   = 0;
 
   std::fill(std::begin(x->ringL), std::end(x->ringL), 0.0);
   std::fill(std::begin(x->ringR), std::end(x->ringR), 0.0);
@@ -420,12 +448,49 @@ t_max_err primefir_attr_set_keys_a(t_primefir* x, void*, long ac, t_atom* av) {
   return MAX_ERR_NONE;
 }
 
+// ===== Linear-phase mix attributes =====
+t_max_err primefir_attr_set_linmix_auto(t_primefir* x, void*, long ac, t_atom* av) {
+  if (ac && av) {
+    x->param_linmix_auto = (char)(atom_getlong(av) ? 1 : 0);
+    // Se siamo in lin-phase, aggiorna subito lo stato della rampa
+    if (x->param_linphase) {
+      if (x->param_linmix_auto) {
+        uint32_t by_ms = (x->param_linmix_ms > 0.0)
+          ? (uint32_t)std::max(1.0, std::round((x->param_linmix_ms/1000.0) * x->sr))
+          : std::max<uint32_t>(1u, x->latency);
+        x->linmix = 0.0;
+        x->linmix_ramp_len  = by_ms;
+        x->linmix_ramp_left = by_ms;
+      } else {
+        x->linmix = 1.0;
+        x->linmix_ramp_len = x->linmix_ramp_left = 0;
+      }
+    }
+  }
+  return MAX_ERR_NONE;
+}
+t_max_err primefir_attr_set_linmix_ms(t_primefir* x, void*, long ac, t_atom* av) {
+  if (ac && av) {
+    x->param_linmix_ms = std::max(0.0, (double)atom_getfloat(av));
+    // non forziamo rampa: si (ri)inizierà al prossimo update_kernel/clear
+  }
+  return MAX_ERR_NONE;
+}
+
 // =====================  COMANDI  =====================
 void primefir_clear(t_primefir* x)
 {
   std::fill(std::begin(x->ringL), std::end(x->ringL), 0.0);
   std::fill(std::begin(x->ringR), std::end(x->ringR), 0.0);
   x->write_idx = 0;
+
+  // All’avvio/clear: se la fase lineare è attiva e l’auto-fade è on,
+  // riparti causale e rampa verso la simmetria per preservare l’unità all’onset.
+  if (x->param_linphase && x->param_linmix_auto) {
+    x->linmix = 0.0;
+    x->linmix_ramp_len  = std::max<uint32_t>(1u, x->latency);
+    x->linmix_ramp_left = x->linmix_ramp_len;
+  }
 }
 
 // =====================  SEQUENZE  =====================
@@ -719,6 +784,26 @@ void primefir_update_kernel(t_primefir* x)
 
   x->post_scale = norm * gcomp;
   x->dirty = false;
+
+  // ===== Impostazione/riarmo rampa di simmetrizzazione =====
+  if (x->param_linphase) {
+    if (x->param_linmix_auto) {
+      uint32_t by_ms = (x->param_linmix_ms > 0.0)
+          ? (uint32_t)std::max(1.0, std::round((x->param_linmix_ms/1000.0) * x->sr))
+          : std::max<uint32_t>(1u, x->latency); // default: durata = latency
+      x->linmix = 0.0;
+      x->linmix_ramp_len  = by_ms;
+      x->linmix_ramp_left = by_ms;
+    } else {
+      x->linmix = 1.0;               // simmetria piena subito
+      x->linmix_ramp_len  = 0;
+      x->linmix_ramp_left = 0;
+    }
+  } else {
+    x->linmix = 0.0;                 // percorso causale puro
+    x->linmix_ramp_len  = 0;
+    x->linmix_ramp_left = 0;
+  }
 }
 
 // =====================  DSP  =====================
@@ -860,6 +945,18 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
 
     uint32_t ri = (wi - latency) & kRingMask;
 
+    // ===== Aggiorna quota di lin-phase (rampa onset-safe) =====
+    double alpha = 0.0;
+    if (do_linphase) {
+      if (x->linmix_ramp_left > 0) {
+        --x->linmix_ramp_left;
+        if (x->linmix_ramp_len > 0)
+          x->linmix += 1.0 / (double)x->linmix_ramp_len;
+        if (x->linmix > 1.0) x->linmix = 1.0;
+      }
+      alpha = x->linmix; // 0..1
+    }
+
     double accL = fir0 * x->ringL[ri];
     double accR = fir0 * x->ringR[ri];
 
@@ -870,61 +967,73 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
       const uint32_t D = x->ioffs[d];
 
       double vbL = 0.0, vbR = 0.0;
-      double vfL = 0.0, vfR = 0.0;
+      double vfL = 0.0, vfR = 0.0;   // ramo "futuro" calcolato solo se serve
 
       switch (imode) {
         case interp_mode::linear: {
           uint32_t base_b = (ri - D) & kRingMask;
-          uint32_t base_f = (ri + D + 1u) & kRingMask;
           vbL = ring_apply_rev(x->ringL, base_b, x->w_lin[d], 2);
           vbR = ring_apply_rev(x->ringR, base_b, x->w_lin[d], 2);
-          vfL = ring_apply_rev(x->ringL, base_f, x->w_lin_fwd[d], 2);
-          vfR = ring_apply_rev(x->ringR, base_f, x->w_lin_fwd[d], 2);
+          if (do_linphase && alpha > 0.0) {
+            uint32_t base_f = (ri + D + 1u) & kRingMask;
+            vfL = ring_apply_rev(x->ringL, base_f, x->w_lin_fwd[d], 2);
+            vfR = ring_apply_rev(x->ringR, base_f, x->w_lin_fwd[d], 2);
+          }
         } break;
 
         case interp_mode::lagrange4: {
           uint32_t base_b = (ri - D) & kRingMask;
-          uint32_t base_f = (ri + D + 1u) & kRingMask;
           vbL = ring_apply_rev(x->ringL, base_b, x->w_lag4[d], 4);
           vbR = ring_apply_rev(x->ringR, base_b, x->w_lag4[d], 4);
-          vfL = ring_apply_rev(x->ringL, base_f, x->w_lag4_fwd[d], 4);
-          vfR = ring_apply_rev(x->ringR, base_f, x->w_lag4_fwd[d], 4);
+          if (do_linphase && alpha > 0.0) {
+            uint32_t base_f = (ri + D + 1u) & kRingMask;
+            vfL = ring_apply_rev(x->ringL, base_f, x->w_lag4_fwd[d], 4);
+            vfR = ring_apply_rev(x->ringR, base_f, x->w_lag4_fwd[d], 4);
+          }
         } break;
 
         case interp_mode::catmullrom: {
           uint32_t base_b = (ri - D - 1u) & kRingMask;
-          uint32_t base_f = (ri + D) & kRingMask;
           vbL = ring_apply_keys(x->ringL, base_b, x->w_keys[d]);
           vbR = ring_apply_keys(x->ringR, base_b, x->w_keys[d]);
-          vfL = ring_apply_keys(x->ringL, base_f, x->w_keys_fwd[d]);
-          vfR = ring_apply_keys(x->ringR, base_f, x->w_keys_fwd[d]);
+          if (do_linphase && alpha > 0.0) {
+            uint32_t base_f = (ri + D) & kRingMask;
+            vfL = ring_apply_keys(x->ringL, base_f, x->w_keys_fwd[d]);
+            vfR = ring_apply_keys(x->ringR, base_f, x->w_keys_fwd[d]);
+          }
         } break;
 
         case interp_mode::farrow3: {
           uint32_t base_b = (ri - D) & kRingMask;
-          uint32_t base_f = (ri + D + 1u) & kRingMask;
           vbL = ring_apply_rev(x->ringL, base_b, x->w_far3[d], 4);
           vbR = ring_apply_rev(x->ringR, base_b, x->w_far3[d], 4);
-          vfL = ring_apply_rev(x->ringL, base_f, x->w_far3_fwd[d], 4);
-          vfR = ring_apply_rev(x->ringR, base_f, x->w_far3_fwd[d], 4);
+          if (do_linphase && alpha > 0.0) {
+            uint32_t base_f = (ri + D + 1u) & kRingMask;
+            vfL = ring_apply_rev(x->ringL, base_f, x->w_far3_fwd[d], 4);
+            vfR = ring_apply_rev(x->ringR, base_f, x->w_far3_fwd[d], 4);
+          }
         } break;
 
         case interp_mode::farrow5: {
           uint32_t base_b = (ri - D) & kRingMask;
-          uint32_t base_f = (ri + D + 1u) & kRingMask;
           vbL = ring_apply_rev(x->ringL, base_b, x->w_far5[d], 6);
           vbR = ring_apply_rev(x->ringR, base_b, x->w_far5[d], 6);
-          vfL = ring_apply_rev(x->ringL, base_f, x->w_far5_fwd[d], 6);
-          vfR = ring_apply_rev(x->ringR, base_f, x->w_far5_fwd[d], 6);
+          if (do_linphase && alpha > 0.0) {
+            uint32_t base_f = (ri + D + 1u) & kRingMask;
+            vfL = ring_apply_rev(x->ringL, base_f, x->w_far5_fwd[d], 6);
+            vfR = ring_apply_rev(x->ringR, base_f, x->w_far5_fwd[d], 6);
+          }
         } break;
 
         default: {
           uint32_t idx_b = (ri - D) & kRingMask;
-          uint32_t idx_f = (ri + D) & kRingMask;
           vbL = x->ringL[idx_b];
           vbR = x->ringR[idx_b];
-          vfL = x->ringL[idx_f];
-          vfR = x->ringR[idx_f];
+          if (do_linphase && alpha > 0.0) {
+            uint32_t idx_f = (ri + D) & kRingMask;
+            vfL = x->ringL[idx_f];
+            vfR = x->ringR[idx_f];
+          }
         } break;
       }
 
@@ -933,9 +1042,14 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
       if (!std::isfinite(vfL)) vfL = 0.0;
       if (!std::isfinite(vfR)) vfR = 0.0;
 
-      if (do_linphase) {
-        accL += c * (vbL + vfL);
-        accR += c * (vbR + vfR);
+      if (do_linphase) { // mix onset-safe: da causale a simmetrico
+        // Per DC: vb == vf == 1 ⇒ pesi totali restano 2h_d per qualunque alpha (unità preservata).
+        const double mix_b_L = (1.0 - alpha) * (2.0 * vbL);
+        const double mix_b_R = (1.0 - alpha) * (2.0 * vbR);
+        const double mix_l_L = alpha * (vbL + vfL);
+        const double mix_l_R = alpha * (vbR + vfR);
+        accL += c * (mix_b_L + mix_l_L);
+        accR += c * (mix_b_R + mix_l_R);
       } else {
         // causale: usa solo il lato "passato" e raddoppia il peso dei pari
         accL += (2.0 * c) * vbL;
@@ -943,6 +1057,8 @@ void primefir_perform64(t_primefir* x, t_object*, double** ins, long numins,
       }
     }
 
+    // Questa simmetrizzazione mira alla massima qualità matematico‑unitaria
+    // preservando l’unità all’origine (onset) e riducendo il pre‑ringing.
     outL[n] = accL * scale;
     outR[n] = accR * scale;
 
