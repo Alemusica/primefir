@@ -21,6 +21,9 @@ file(GLOB SRC
   "${CMAKE_CURRENT_LIST_DIR}/source/*.cxx"
 )
 
+# Skip any backup sources so they don't get compiled alongside the real one.
+list(FILTER SRC EXCLUDE REGEX "_backup")
+
 # Target SENZA tilde; bundle CON tilde
 add_library(primefir MODULE ${SRC})
 set_target_properties(primefir PROPERTIES
