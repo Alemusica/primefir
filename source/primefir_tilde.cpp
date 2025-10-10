@@ -398,11 +398,25 @@ t_max_err primefir_attr_set_winshape(t_primefir* x, void*, long ac, t_atom* av) 
   return MAX_ERR_NONE;
 }
 t_max_err primefir_attr_set_kaiser_beta(t_primefir* x, void*, long ac, t_atom* av) {
-  if (ac && av) { x->param_kaiser_beta = atom_getfloat(av); x->dirty = true; }
+  if (ac && av) {
+    x->param_kaiser_beta = atom_getfloat(av);
+    x->dirty = true;
+    if (static_cast<winshape>(x->param_winshape) != winshape::kaiser) {
+      object_post(reinterpret_cast<t_object*>(x),
+                  "primefir~: @kaiser_beta è attivo solo con @winshape kaiser");
+    }
+  }
   return MAX_ERR_NONE;
 }
 t_max_err primefir_attr_set_keys_a(t_primefir* x, void*, long ac, t_atom* av) {
-  if (ac && av) { x->param_keys_a = atom_getfloat(av); x->dirty = true; }
+  if (ac && av) {
+    x->param_keys_a = atom_getfloat(av);
+    x->dirty = true;
+    if (static_cast<interp_mode>(x->param_interp) != interp_mode::catmullrom) {
+      object_post(reinterpret_cast<t_object*>(x),
+                  "primefir~: @keys_a controlla solo l'interpolazione catmullrom");
+    }
+  }
   return MAX_ERR_NONE;
 }
 
